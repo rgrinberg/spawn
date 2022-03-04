@@ -27,4 +27,8 @@ promote:
 fmt:
 	dune build @fmt --auto-promote
 
+.PHONY: nix/opam-selection.nix
+nix/opam-selection.nix:
+	nix-shell -A resolve default.nix
+
 .PHONY: default install uninstall reinstall clean test

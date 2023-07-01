@@ -13,10 +13,38 @@ CAMLextern int caml_convert_signal_number(int);
 
 #if defined(__APPLE__)
 
-# if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 120000
+# if defined(__MAC_OS_X_VERSION_MAX_ALLOWED)
 #  define USE_POSIX_SPAWN
 #  define vfork fork
 # endif
+
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#ifndef SYS___pthread_chdir
+#define SYS___pthread_chdir 348
+#endif
+#ifndef SYS___pthread_fchdir
+#define SYS___pthread_fchdir 349
+#endif
+
+static int __pthread_chdir(const char *path) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated"
+  return syscall(SYS___pthread_chdir, path);
+#pragma clang diagnostic pop
+}
+
+static int __pthread_fchdir(int fd) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated"
+  return syscall(SYS___pthread_fchdir, fd);
+#pragma clang diagnostic pop
+}
+
 
 CAMLprim value spawn_is_osx()
 {
@@ -558,25 +586,6 @@ CAMLprim value spawn_unix(value v_env,
     }
   }
 
-  switch (info.cwd_kind) {
-    case INHERIT: break;
-    case PATH:
-      e_error = posix_spawn_file_actions_addchdir_np(&actions, info.cwd.path);
-      if (e_error) {
-        e_function = "posix_spawn_file_actions_addchdir_np";
-        e_arg = Field(v_cwd, 0);
-        goto cleanup;
-      }
-      break;
-    case FD:
-      e_error = posix_spawn_file_actions_addfchdir_np(&actions, info.cwd.fd);
-      if (e_error) {
-        e_function = "posix_spawn_file_actions_addfchdir_np";
-        goto cleanup;
-      }
-      break;
-  }
-
   for (int fd = 0; fd < 3; fd++) {
     int tmp_fd = tmp_fds[fd] = safe_dup(info.std_fds[fd]);
     if (tmp_fd == -1) {
@@ -598,10 +607,30 @@ CAMLprim value spawn_unix(value v_env,
     }
   }
 
+  switch (info.cwd_kind) {
+    case INHERIT: break;
+    case PATH:
+      e_error = __pthread_chdir(info.cwd.path);
+      if (e_error) {
+        e_function = "__pthread_chdir";
+        goto cleanup;
+      }
+      break;
+    case FD:
+      e_error = __pthread_fchdir(info.cwd.fd);
+      if (e_error) {
+        e_function = "__pthread_fchdir";
+        goto cleanup;
+      }
+  }
   caml_enter_blocking_section();
   e_error = posix_spawn(&pid, info.prog,
                         &actions, &attr,
                         info.argv, info.env);
+  if (info.cwd_kind != INHERIT) {
+    /* go back to inheriting the process cwd */
+    __pthread_fchdir(-1);
+  }
   caml_leave_blocking_section();
 
   if (e_error) {
